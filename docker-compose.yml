@@ -1,0 +1,54 @@
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_DATABASE: ${MARIADB_DATABASE:-boom}
+      MARIADB_USER: ${MARIADB_USER:-boom}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD:-boom}
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:-boomroot}
+    ports:
+      - "3306:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    volumes:
+      - ./backend:/app
+      - models_data:/models
+    environment:
+      # SQLAlchemy URL (PyMySQL)
+      DATABASE_URL: mysql+pymysql://${MARIADB_USER:-boom}:${MARIADB_PASSWORD:-boom}@db:3306/${MARIADB_DATABASE:-boom}
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      HF_TOKEN: ${HF_TOKEN:-}
+      MODELS_DIR: /models
+      CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    environment:
+      VITE_API_BASE_URL: ""
+      VITE_PROXY_TARGET: http://backend:8000
+    command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  db_data:
+  models_data:
