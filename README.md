@@ -16,7 +16,7 @@
 |-----------|------------|
 | Backend | FastAPI, SQLAlchemy, Alembic, JWT |
 | БД | MariaDB |
-| LLM | llama-cpp-python (llama.cpp) |
+| LLM | Ollama |
 | Frontend | React 19, Vite, TypeScript |
 | Инфра | Docker Compose |
 
@@ -53,7 +53,7 @@ HF_TOKEN=
 docker compose up --build
 ```
 
-Первый запуск может занять несколько минут (сборка backend с llama-cpp-python).
+Первый запуск может занять несколько минут (сборка backend, загрузка образов Ollama).
 
 ### 4. Доступ
 
@@ -79,7 +79,7 @@ BoomAccounting/
 │   │   ├── core/      # Конфиг, security
 │   │   ├── db/        # Модели, сессия
 │   │   ├── schemas/   # Pydantic-схемы
-│   │   └── services/  # llm_runner, hf_downloader
+│   │   └── services/  # ollama_client, hf_downloader
 │   ├── alembic/       # Миграции БД
 │   └── requirements.txt
 ├── frontend/          # React приложение
@@ -97,8 +97,8 @@ BoomAccounting/
 | POST | `/auth/register` | Регистрация |
 | POST | `/auth/login` | Вход |
 | GET | `/auth/me` | Текущий пользователь |
-| GET | `/models` | Список моделей пользователя |
-| POST | `/models` | Добавить модель (скачать) |
+| GET | `/models` | Список моделей (общая библиотека) |
+| POST | `/models/download` | Скачать модель с Hugging Face |
 | GET | `/chats` | Список чатов |
 | POST | `/chats` | Создать чат |
 | POST | `/chats/remove` | Удалить чат (body: `{ chat_id }`) |
@@ -150,7 +150,7 @@ docker compose up -d backend
 | Failed to fetch | Проверь, что backend запущен (`docker compose ps`) |
 | Method Not Allowed | Убедись, что backend перезапущен после изменений |
 | Модель не скачивается | Проверь HF_TOKEN для приватных репозиториев |
-| Медленная первая генерация | llama.cpp загружает модель в память при первом запросе |
+| Медленная первая генерация | Ollama загружает модель в память при первом запросе |
 
 ## Лицензия
 

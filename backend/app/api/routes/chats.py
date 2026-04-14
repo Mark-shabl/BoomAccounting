@@ -9,7 +9,7 @@ from app.api.deps import get_current_user
 from app.db.models import Chat, Message, Model, User
 from app.db.session import get_db
 from app.schemas import ChatCreateIn, ChatDeleteIn, ChatDetailOut, ChatOut, MessageCreateIn, MessageOut, StreamParamsIn
-from app.services.llm_runner import llm_runner
+from app.services.ollama_client import chat_stream, ensure_model_in_ollama
 
 
 router = APIRouter()
@@ -28,7 +28,7 @@ def delete_chat(payload: ChatDeleteIn, user: User = Depends(get_current_user), d
 @router.post("", response_model=ChatOut)
 def create_chat(payload: ChatCreateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     model = db.get(Model, payload.model_id)
-    if not model or model.owner_user_id != user.id:
+    if not model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
 
     title = payload.title.strip() if payload.title else "New chat"
@@ -89,10 +89,12 @@ def _stream_assistant_impl(chat_id: int, payload: StreamParamsIn, user: User, db
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
     model = db.get(Model, chat.model_id)
-    if not model or model.owner_user_id != user.id:
+    if not model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
     if not model.local_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model is not downloaded yet")
+
+    ensure_model_in_ollama(model)
 
     messages = db.scalars(
         select(Message).where(Message.chat_id == chat.id, Message.id <= payload.after_message_id).order_by(asc(Message.id))
@@ -103,34 +105,30 @@ def _stream_assistant_impl(chat_id: int, payload: StreamParamsIn, user: User, db
     chat_messages = [{"role": m.role, "content": m.content} for m in messages]
     if payload.system_prompt and payload.system_prompt.strip():
         chat_messages.insert(0, {"role": "system", "content": payload.system_prompt.strip()})
-    llama = llm_runner.get_llama(model)
 
     def event_gen():
         assistant_text_parts: list[str] = []
         tokens_used = 0
         try:
             yield {"event": "start", "data": ""}
-            for chunk in llama.create_chat_completion(
-                messages=chat_messages,
-                stream=True,
+            for content, done, eval_count in chat_stream(
+                model,
+                chat_messages,
                 temperature=payload.temperature,
                 max_tokens=payload.max_tokens,
                 top_p=payload.top_p,
                 top_k=payload.top_k,
                 repeat_penalty=payload.repeat_penalty,
             ):
-                delta = chunk["choices"][0]["delta"].get("content") or ""
-                if delta:
-                    assistant_text_parts.append(delta)
-                    yield {"event": "token", "data": delta}
+                if content:
+                    assistant_text_parts.append(content)
+                    yield {"event": "token", "data": content}
+                if done:
+                    tokens_used = eval_count
+                    break
             final_text = "".join(assistant_text_parts).strip()
             if final_text:
-                try:
-                    token_ids = llama.tokenize(final_text.encode("utf-8"), add_bos=False)
-                    tokens_used = len(token_ids)
-                except Exception:
-                    tokens_used = max(1, len(final_text) // 4)  # fallback approximation
-                m = Message(chat_id=chat.id, role="assistant", content=final_text, tokens_used=tokens_used)
+                m = Message(chat_id=chat.id, role="assistant", content=final_text, tokens_used=tokens_used or None)
                 db.add(m)
                 db.commit()
             yield {"event": "done", "data": str(tokens_used)}

@@ -5,7 +5,6 @@ import type {
   HfModelSummary,
   HfRepoFile,
   LoadedModelsResponse,
-  ModelCatalogItem,
   ModelDownloadJobOut,
   ModelOut,
 } from '../types'
@@ -30,14 +29,13 @@ export function ModelsPage({
   auth: { token: string | null; fetchMe: () => Promise<void> }
 }) {
   const token = auth.token!
-  const [catalog, setCatalog] = useState<ModelCatalogItem[]>([])
-  const [selectedCatalogId, setSelectedCatalogId] = useState<string>('tinyllama-q4km')
-  const [hfRepo, setHfRepo] = useState('TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF')
-  const [hfFilename, setHfFilename] = useState('tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf')
+  const [hfRepo, setHfRepo] = useState('')
+  const [hfFilename, setHfFilename] = useState('')
   const [hfSearch, setHfSearch] = useState('gguf')
   const [hfResults, setHfResults] = useState<HfModelSummary[]>([])
   const [hfFiles, setHfFiles] = useState<HfRepoFile[]>([])
   const [hfBusy, setHfBusy] = useState(false)
+  const [hfSearchErr, setHfSearchErr] = useState<string | null>(null)
 
   const [models, setModels] = useState<ModelOut[]>([])
   const [jobs, setJobs] = useState<ModelDownloadJobOut[]>([])
@@ -63,19 +61,18 @@ export function ModelsPage({
   }, [jobs])
 
   async function refresh() {
-    const [cat, m, j, loaded] = await Promise.all([
-      apiRequest<ModelCatalogItem[]>('/models/catalog', { token }),
+    const [m, j, loaded] = await Promise.all([
       apiRequest<ModelOut[]>('/models', { token }),
       apiRequest<ModelDownloadJobOut[]>('/models/jobs', { token }),
       apiRequest<LoadedModelsResponse>('/models/loaded', { token }).catch(() => null),
     ])
-    setCatalog(cat)
     setModels(m)
     setJobs(j)
     setLoadedModels(loaded)
   }
 
   async function onLoad(modelId: number) {
+    setErr(null)
     setLoadUnloadBusy(modelId)
     try {
       await apiRequest(`/models/${modelId}/load`, { method: 'POST', token })
@@ -88,6 +85,7 @@ export function ModelsPage({
   }
 
   async function onUnload(modelId: number) {
+    setErr(null)
     setLoadUnloadBusy(modelId)
     try {
       await apiRequest(`/models/${modelId}/unload`, { method: 'POST', token })
@@ -101,12 +99,17 @@ export function ModelsPage({
 
   async function runHfSearch() {
     setHfBusy(true)
+    setHfSearchErr(null)
     try {
       const res = await apiRequest<HfModelSummary[]>(
         `/hf/models?q=${encodeURIComponent(hfSearch)}&limit=20`,
         { token }
       )
       setHfResults(res)
+    } catch (e: any) {
+      const msg = (e as ApiError)?.message ?? String(e)
+      setHfSearchErr(msg)
+      setHfResults([])
     } finally {
       setHfBusy(false)
     }
@@ -114,6 +117,7 @@ export function ModelsPage({
 
   async function loadHfFiles(repoId: string) {
     setHfBusy(true)
+    setHfSearchErr(null)
     try {
       const files = await apiRequest<HfRepoFile[]>(
         `/hf/repo-files?repo_id=${encodeURIComponent(repoId)}&only_gguf=true`,
@@ -122,7 +126,9 @@ export function ModelsPage({
       setHfFiles(files)
       setHfRepo(repoId)
       setHfFilename(files[0]?.filename ?? '')
-      setSelectedCatalogId('') // сброс пресета — используем выбор из Browse
+    } catch (e: any) {
+      const msg = (e as ApiError)?.message ?? String(e)
+      setHfSearchErr(msg)
     } finally {
       setHfBusy(false)
     }
@@ -154,7 +160,7 @@ export function ModelsPage({
       await refresh()
     } catch (e: any) {
       const ae = e as ApiError
-      setErr(ae?.message ?? String(e))
+      setErr(ae?.status === 409 ? 'Модель уже есть в библиотеке' : (ae?.message ?? String(e)))
     } finally {
       setBusy(false)
     }
@@ -173,51 +179,17 @@ export function ModelsPage({
         <h3 style={{ marginTop: 0 }}>Download from Hugging Face</h3>
         <form onSubmit={onDownload} className="list">
           <label className="list">
-            <span className="muted">Preset</span>
-            <select
-              aria-label="Preset model"
-              value={selectedCatalogId}
-              onChange={(e) => {
-                const id = e.target.value
-                setSelectedCatalogId(id)
-                const item = catalog.find((c) => c.id === id)
-                if (item) {
-                  setHfRepo(item.hf_repo)
-                  setHfFilename(item.hf_filename)
-                }
-              }}
-            >
-              <option value="">Custom / из выбора ниже</option>
-              {catalog.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label}
-                </option>
-              ))}
-            </select>
-            {catalog.find((c) => c.id === selectedCatalogId)?.description ? (
-              <div className="muted" style={{ fontSize: 12 }}>
-                {catalog.find((c) => c.id === selectedCatalogId)?.description}
-              </div>
-            ) : null}
-          </label>
-          <label className="list">
             <span className="muted">Repo</span>
             <input
               value={hfRepo}
-              onChange={(e) => {
-                setHfRepo(e.target.value)
-                setSelectedCatalogId('')
-              }}
+              onChange={(e) => setHfRepo(e.target.value)}
             />
           </label>
           <label className="list">
             <span className="muted">Filename (.gguf)</span>
             <input
               value={hfFilename}
-              onChange={(e) => {
-                setHfFilename(e.target.value)
-                setSelectedCatalogId('')
-              }}
+              onChange={(e) => setHfFilename(e.target.value)}
             />
           </label>
 
@@ -228,14 +200,33 @@ export function ModelsPage({
                 search → pick repo → pick .gguf
               </span>
             </div>
+            {hfSearchErr ? (
+              <div
+                className="card"
+                style={{
+                  marginBottom: 10,
+                  borderColor: 'rgba(239,68,68,0.35)',
+                  background: 'rgba(239,68,68,0.06)',
+                  fontSize: 13,
+                }}
+              >
+                {hfSearchErr}
+              </div>
+            ) : null}
             <div style={{ height: 10 }} />
             <div className="row">
               <input
                 value={hfSearch}
                 onChange={(e) => setHfSearch(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    runHfSearch().catch(() => {})
+                  }
+                }}
                 placeholder="Search models… (e.g. tinyllama gguf)"
               />
-              <button type="button" disabled={hfBusy} onClick={() => runHfSearch().catch(() => {})}>
+              <button type="button" className="btn-ghost" disabled={hfBusy} onClick={() => runHfSearch().catch(() => {})}>
                 {hfBusy ? '…' : 'Search'}
               </button>
             </div>
@@ -250,6 +241,7 @@ export function ModelsPage({
                     <button
                       key={r.repo_id}
                       type="button"
+                      className={hfRepo === r.repo_id ? 'btn-primary' : ''}
                       onClick={() => loadHfFiles(r.repo_id).catch(() => {})}
                       style={{
                         borderColor: hfRepo === r.repo_id ? 'rgba(99,102,241,0.6)' : undefined,
@@ -274,12 +266,10 @@ export function ModelsPage({
                     <button
                       key={f.filename}
                       type="button"
-                      onClick={() => {
-                        setHfFilename(f.filename)
-                        setSelectedCatalogId('')
-                      }}
+                      onClick={() => setHfFilename(f.filename)}
                       style={{
                         borderColor: hfFilename === f.filename ? 'rgba(16,185,129,0.6)' : undefined,
+                        background: hfFilename === f.filename ? 'rgba(16,185,129,0.12)' : undefined,
                       }}
                     >
                       <div style={{ fontWeight: 600 }}>{f.filename}</div>
@@ -307,7 +297,7 @@ export function ModelsPage({
               Скачивание запущено: <strong>{downloadStarted}</strong> — смотри прогресс ниже.
             </div>
           ) : null}
-          <button disabled={busy || !hfRepo || !hfFilename}>
+          <button type="submit" className="btn-primary" disabled={busy || !hfRepo || !hfFilename}>
             {busy ? 'Запускаю…' : 'Скачать'}
           </button>
         </form>
@@ -334,20 +324,22 @@ export function ModelsPage({
                     }}
                   >
                     <div
+                      className={job.progress_bytes === 0 ? 'progress-bar-indeterminate' : ''}
                       style={{
                         height: '100%',
                         width:
                           job.progress_bytes > 0
                             ? `${Math.min(98, Math.round((job.progress_bytes / (200 * 1024 * 1024)) * 100))}%`
-                            : '15%',
+                            : '25%',
                         background: 'rgba(99,102,241,0.8)',
                         borderRadius: 4,
-                        transition: 'width 0.8s ease',
+                        transition: job.progress_bytes > 0 ? 'width 0.8s ease' : undefined,
                       }}
                     />
                   </div>
                   <span className="muted" style={{ fontSize: 13, whiteSpace: 'nowrap' }}>
-                    {statusLabel(job.status)} {progressMb}
+                    {statusLabel(job.status)}{' '}
+                    {job.progress_bytes > 0 ? progressMb : 'подключение…'}
                   </span>
                 </div>
               </div>
@@ -372,6 +364,7 @@ export function ModelsPage({
                 </span>
                 <button
                   type="button"
+                  className="btn-ghost"
                   disabled={loadUnloadBusy === m.id}
                   onClick={() => onUnload(m.id)}
                   style={{ padding: '4px 10px', fontSize: 12 }}
@@ -385,14 +378,15 @@ export function ModelsPage({
       ) : null}
 
       <div className="card">
-        <h3 style={{ marginTop: 0 }}>Мои модели</h3>
+        <h3 style={{ marginTop: 0 }}>Библиотека моделей</h3>
         {models.length === 0 ? <div className="muted">No models yet.</div> : null}
         <div className="list">
           {models.map((m) => {
             const job = jobsByModel.get(m.id)
             const isActive = job && (job.status === 'pending' || job.status === 'running')
             const isFailed = job?.status === 'failed'
-            const isDone = job?.status === 'done' || m.local_path
+            const isBroken = !m.local_path && job?.status === 'done'
+            const isDone = m.local_path && (job?.status === 'done' || true)
             const isLoaded = loadedModels?.model_ids.includes(m.id) ?? false
             return (
               <div
@@ -400,7 +394,15 @@ export function ModelsPage({
                 className="card"
                 style={{
                   padding: 12,
-                  borderColor: isActive ? 'rgba(99,102,241,0.5)' : isFailed ? 'rgba(239,68,68,0.4)' : isLoaded ? 'rgba(16,185,129,0.4)' : undefined,
+                  borderColor: isActive
+                    ? 'rgba(99,102,241,0.5)'
+                    : isBroken
+                      ? 'rgba(245,158,11,0.4)'
+                      : isFailed
+                        ? 'rgba(239,68,68,0.4)'
+                        : isLoaded
+                          ? 'rgba(16,185,129,0.4)'
+                          : undefined,
                 }}
               >
                 <div className="row" style={{ justifyContent: 'space-between' }}>
@@ -420,12 +422,14 @@ export function ModelsPage({
                         borderRadius: 6,
                         background: isDone
                           ? 'rgba(34,197,94,0.2)'
-                          : isFailed
-                            ? 'rgba(239,68,68,0.2)'
-                            : 'rgba(99,102,241,0.2)',
+                          : isBroken
+                            ? 'rgba(245,158,11,0.2)'
+                            : isFailed
+                              ? 'rgba(239,68,68,0.2)'
+                              : 'rgba(99,102,241,0.2)',
                       }}
                     >
-                      {job ? statusLabel(job.status) : m.local_path ? 'Готово' : '—'}
+                      {isBroken ? 'Требуется перескачивание' : job ? statusLabel(job.status) : m.local_path ? 'Готово' : '—'}
                     </span>
                   </div>
                 </div>
@@ -445,11 +449,33 @@ export function ModelsPage({
                       <span className="muted" style={{ fontSize: 13 }}>{formatBytes(m.size_bytes)}</span>
                     ) : null}
                   </div>
-                  {m.local_path && !isActive ? (
+                  {!m.local_path && !isActive ? (
+                    <button
+                      type="button"
+                      className="btn-primary"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true)
+                        setErr(null)
+                        try {
+                          await apiRequest(`/models/${m.id}/retry-download`, { method: 'POST', token })
+                          await refresh()
+                        } catch (e: any) {
+                          setErr((e as ApiError)?.message ?? String(e))
+                        } finally {
+                          setBusy(false)
+                        }
+                      }}
+                      style={{ padding: '4px 10px', fontSize: 12 }}
+                    >
+                      Повторить скачивание
+                    </button>
+                  ) : m.local_path && !isActive ? (
                     <div className="row" style={{ gap: 6 }}>
                       {isLoaded ? (
                         <button
                           type="button"
+                          className="btn-ghost"
                           disabled={loadUnloadBusy === m.id}
                           onClick={() => onUnload(m.id)}
                           style={{ padding: '4px 10px', fontSize: 12 }}
@@ -459,11 +485,12 @@ export function ModelsPage({
                       ) : (
                         <button
                           type="button"
+                          className="btn-primary"
                           disabled={loadUnloadBusy === m.id}
                           onClick={() => onLoad(m.id)}
                           style={{ padding: '4px 10px', fontSize: 12 }}
                         >
-                          {loadUnloadBusy === m.id ? '…' : 'Загрузить'}
+                          {loadUnloadBusy === m.id ? 'Загрузка…' : 'Загрузить'}
                         </button>
                       )}
                     </div>

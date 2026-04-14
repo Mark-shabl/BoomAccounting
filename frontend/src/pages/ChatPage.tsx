@@ -94,6 +94,24 @@ export function ChatPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // Fetch Ollama model params when model is selected (chat loaded or new chat model picked)
+  useEffect(() => {
+    const modelId = detail?.chat?.model_id ?? (newChatModelId !== '' ? Number(newChatModelId) : null)
+    if (!modelId) return
+    apiRequest<{ temperature?: number; num_predict?: number; top_p?: number; top_k?: number; repeat_penalty?: number }>(
+      `/models/${modelId}/ollama-params`,
+      { token }
+    )
+      .then((p) => {
+        if (p.temperature != null) setTemperature(p.temperature)
+        if (p.num_predict != null) setMaxTokens(p.num_predict)
+        if (p.top_p != null) setTopP(p.top_p)
+        if (p.top_k != null) setTopK(p.top_k)
+        if (p.repeat_penalty != null) setRepeatPenalty(p.repeat_penalty)
+      })
+      .catch(() => {})
+  }, [detail?.chat?.model_id, newChatModelId, token])
+
   async function onDeleteChat(e: React.MouseEvent, chatId: number) {
     e.stopPropagation()
     if (!confirm('Удалить этот чат?')) return
@@ -157,13 +175,17 @@ export function ChatPage({
         return { ...d, messages: [...d.messages, userMsg, { ...userMsg, id: -Date.now(), role: 'assistant', content: '' }] }
       })
 
+      const safeNum = (v: number, def: number, min: number, max: number) => {
+        const n = Number.isFinite(v) ? v : def
+        return Math.max(min, Math.min(max, n))
+      }
       const params = new URLSearchParams({
         after_message_id: String(userMsg.id),
-        temperature: String(temperature),
-        max_tokens: String(maxTokens),
-        top_p: String(topP),
-        top_k: String(topK),
-        repeat_penalty: String(repeatPenalty),
+        temperature: String(safeNum(temperature, 0.7, 0, 2)),
+        max_tokens: String(Math.round(safeNum(maxTokens, 512, 1, 4096))),
+        top_p: String(safeNum(topP, 0.95, 0, 1)),
+        top_k: String(Math.round(safeNum(topK, 40, 1, 100))),
+        repeat_penalty: String(safeNum(repeatPenalty, 1.1, 1, 2)),
       })
       if (systemPrompt.trim()) params.set('system_prompt', systemPrompt.trim())
       const streamUrl = `${API_BASE_URL}/chats/${activeChatId}/stream?${params}`
@@ -239,6 +261,7 @@ export function ChatPage({
         <form onSubmit={onCreateChat} className="list">
           <div className="row">
             <select
+              className="select-styled"
               aria-label="Model selector"
               value={newChatModelId}
               onChange={(e) => setNewChatModelId(e.target.value ? Number(e.target.value) : '')}
@@ -250,7 +273,7 @@ export function ChatPage({
                 </option>
               ))}
             </select>
-            <button type="submit">New</button>
+            <button type="submit" className="btn-primary">New</button>
           </div>
           <input
             value={newChatTitle}
@@ -273,16 +296,7 @@ export function ChatPage({
           {chats.map((c) => (
             <div
               key={c.id}
-              className="row"
-              style={{
-                border: '1px solid rgba(255,255,255,0.14)',
-                borderRadius: 10,
-                padding: 10,
-                cursor: 'pointer',
-                borderColor: activeChatId === c.id ? 'rgba(99,102,241,0.6)' : undefined,
-                justifyContent: 'space-between',
-                alignItems: 'flex-start',
-              }}
+              className={`row chat-item ${activeChatId === c.id ? 'active' : ''}`}
               onClick={() => loadChat(c.id)}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
@@ -293,6 +307,7 @@ export function ChatPage({
               </div>
               <button
                 type="button"
+                className="btn-ghost btn-danger"
                 onClick={(e) => onDeleteChat(e, c.id)}
                 title="Удалить чат"
                 style={{ flexShrink: 0, padding: '4px 8px', fontSize: 12 }}
@@ -350,7 +365,7 @@ export function ChatPage({
               placeholder={detail ? 'Type a message…' : 'Create/select a chat first…'}
               disabled={!detail || busy}
             />
-            <button disabled={!detail || busy || !input.trim()}>{busy ? 'Sending…' : 'Send'}</button>
+            <button type="submit" className="btn-primary" disabled={!detail || busy || !input.trim()}>{busy ? 'Sending…' : 'Send'}</button>
           </div>
           {err ? (
             <div style={{ marginTop: 10, color: 'tomato' }}>
@@ -382,7 +397,10 @@ export function ChatPage({
               max={2}
               step={0.1}
               value={temperature}
-              onChange={(e) => setTemperature(Number(e.target.value))}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                if (!Number.isNaN(v)) setTemperature(Math.max(0, Math.min(2, v)))
+              }}
             />
           </label>
           <label>
@@ -391,8 +409,12 @@ export function ChatPage({
               type="number"
               min={1}
               max={4096}
+              step={1}
               value={maxTokens}
-              onChange={(e) => setMaxTokens(Number(e.target.value))}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10)
+                if (!Number.isNaN(v)) setMaxTokens(Math.max(1, Math.min(4096, v)))
+              }}
             />
           </label>
           <label>
@@ -403,7 +425,10 @@ export function ChatPage({
               max={1}
               step={0.05}
               value={topP}
-              onChange={(e) => setTopP(Number(e.target.value))}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                if (!Number.isNaN(v)) setTopP(Math.max(0, Math.min(1, v)))
+              }}
             />
           </label>
           <label>
@@ -413,7 +438,10 @@ export function ChatPage({
               min={1}
               max={100}
               value={topK}
-              onChange={(e) => setTopK(Number(e.target.value))}
+              onChange={(e) => {
+                const v = parseInt(e.target.value, 10)
+                if (!Number.isNaN(v)) setTopK(Math.max(1, Math.min(100, v)))
+              }}
             />
           </label>
           <label>
@@ -424,7 +452,10 @@ export function ChatPage({
               max={2}
               step={0.1}
               value={repeatPenalty}
-              onChange={(e) => setRepeatPenalty(Number(e.target.value))}
+              onChange={(e) => {
+                const v = parseFloat(e.target.value)
+                if (!Number.isNaN(v)) setRepeatPenalty(Math.max(1, Math.min(2, v)))
+              }}
             />
           </label>
           <label>

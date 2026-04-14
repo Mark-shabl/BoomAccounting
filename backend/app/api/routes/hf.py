@@ -29,14 +29,17 @@ def search_models(
         models = _api().list_models(
             search=q or "",
             sort="downloads",
-            direction=-1,
             limit=limit,
         )
         out: list[HfModelSummary] = []
         for m in models:
+            # modelId deprecated/removed in newer huggingface_hub; use repo_id or id
+            repo_id = getattr(m, "repo_id", None) or getattr(m, "id", None) or getattr(m, "modelId", None)
+            if not repo_id:
+                continue
             out.append(
                 HfModelSummary(
-                    repo_id=m.modelId,
+                    repo_id=repo_id,
                     likes=getattr(m, "likes", None),
                     downloads=getattr(m, "downloads", None),
                     pipeline_tag=getattr(m, "pipeline_tag", None),

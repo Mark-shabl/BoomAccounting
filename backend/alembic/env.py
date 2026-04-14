@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import os
+import sys
 from logging.config import fileConfig
+
+# Ensure app package is importable (e.g. when running alembic from Docker)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool

@@ -26,14 +26,6 @@ export type ModelDownloadJobOut = {
   finished_at: string | null
 }
 
-export type ModelCatalogItem = {
-  id: string
-  label: string
-  hf_repo: string
-  hf_filename: string
-  description: string | null
-}
-
 export type HfModelSummary = {
   repo_id: string
   likes: number | null

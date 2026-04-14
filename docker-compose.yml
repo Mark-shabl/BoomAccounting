@@ -16,24 +16,38 @@ services:
       timeout: 3s
       retries: 20
 
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama_data:/root/.ollama
+      - models_data:/models
+    ports:
+      - "11434:11434"
+    tty: true
+    stdin_open: true
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
     volumes:
       - ./backend:/app
       - models_data:/models
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
-      # SQLAlchemy URL (PyMySQL)
       DATABASE_URL: mysql+pymysql://${MARIADB_USER:-boom}:${MARIADB_PASSWORD:-boom}@db:3306/${MARIADB_DATABASE:-boom}
       JWT_SECRET: ${JWT_SECRET:-change-me}
       HF_TOKEN: ${HF_TOKEN:-}
       MODELS_DIR: /models
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
+      OLLAMA_HOST: http://ollama:11434
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+      ollama:
+        condition: service_started
 
   frontend:
     image: node:22-alpine
@@ -52,3 +66,4 @@ services:
 volumes:
   db_data:
   models_data:
+  ollama_data:

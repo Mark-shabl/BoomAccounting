@@ -48,14 +48,6 @@ class ModelDownloadJobOut(BaseModel):
     finished_at: datetime | None
 
 
-class ModelCatalogItem(BaseModel):
-    id: str
-    label: str
-    hf_repo: str
-    hf_filename: str
-    description: str | None = None
-
-
 class HfModelSummary(BaseModel):
     repo_id: str
     likes: int | None = None
