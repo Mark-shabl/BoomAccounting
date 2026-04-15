@@ -17,12 +17,13 @@ services:
       retries: 20
 
   ollama:
-    image: ollama/ollama:latest
+    image: ollama/ollama:0.18.1
     volumes:
       - ollama_data:/root/.ollama
       - models_data:/models
+    # Host 11435 avoids conflict with another Ollama (or container) on 11434; inside the stack it's still ollama:11434.
     ports:
-      - "11434:11434"
+      - "11435:11434"
     tty: true
     stdin_open: true
     restart: unless-stopped
@@ -38,6 +39,8 @@ services:
       DATABASE_URL: mysql+pymysql://${MARIADB_USER:-boom}:${MARIADB_PASSWORD:-boom}@db:3306/${MARIADB_DATABASE:-boom}
       JWT_SECRET: ${JWT_SECRET:-change-me}
       HF_TOKEN: ${HF_TOKEN:-}
+      # Python downloader reports progress to DB; Rust hf_transfer often does not
+      HF_HUB_ENABLE_HF_TRANSFER: "0"
       MODELS_DIR: /models
       CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173
       OLLAMA_HOST: http://ollama:11434
@@ -57,6 +60,7 @@ services:
     environment:
       VITE_API_BASE_URL: ""
       VITE_PROXY_TARGET: http://backend:8000
+      CHOKIDAR_USEPOLLING: "true"
     command: sh -lc "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
     ports:
       - "5173:5173"

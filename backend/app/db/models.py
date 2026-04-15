@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -33,6 +33,11 @@ class Model(Base):
     hf_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     local_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    default_temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_max_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_top_p: Mapped[float | None] = mapped_column(Float, nullable=True)
+    default_top_k: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_repeat_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -51,6 +56,7 @@ class ModelDownloadJob(Base):
 
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     progress_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    expected_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

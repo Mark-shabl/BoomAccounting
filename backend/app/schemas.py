@@ -35,6 +35,11 @@ class ModelOut(BaseModel):
     hf_filename: str
     local_path: str | None
     size_bytes: int | None
+    default_temperature: float | None = None
+    default_max_tokens: int | None = None
+    default_top_p: float | None = None
+    default_top_k: int | None = None
+    default_repeat_penalty: float | None = None
     created_at: datetime
 
 
@@ -43,9 +48,27 @@ class ModelDownloadJobOut(BaseModel):
     model_id: int
     status: str
     progress_bytes: int
+    expected_bytes: int | None = None  # from Hugging Face file metadata (total size)
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class ModelSettingsIn(BaseModel):
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    num_predict: int | None = Field(default=None, ge=1, le=4096)
+    top_p: float | None = Field(default=None, ge=0, le=1)
+    top_k: int | None = Field(default=None, ge=1, le=100)
+    repeat_penalty: float | None = Field(default=None, ge=1, le=2)
+
+
+class ModelParamsOut(BaseModel):
+    temperature: float | None = None
+    num_predict: int | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    repeat_penalty: float | None = None
+    source: str = "none"
 
 
 class HfModelSummary(BaseModel):
@@ -105,7 +128,7 @@ class MessageCreateIn(BaseModel):
 class StreamParamsIn(BaseModel):
     after_message_id: int
     temperature: float = 0.7
-    max_tokens: int = 512
+    max_tokens: int | None = Field(default=None, ge=1, le=4096)
     top_p: float = 0.95
     top_k: int = 40
     repeat_penalty: float = 1.1

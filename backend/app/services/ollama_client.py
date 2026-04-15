@@ -22,17 +22,26 @@ def _ollama_url(path: str) -> str:
     return f"{base}{path}"
 
 
+def _looks_like_broken_ollama_model_error(message: str) -> bool:
+    msg = message.lower()
+    return (
+        "unable to load model" in msg
+        or "/root/.ollama/models/blobs/" in msg
+        or "no such file or directory" in msg
+    )
+
+
 def register_model_in_ollama(model: Model) -> None:
     """Create model in Ollama from downloaded GGUF file."""
     if not model.local_path or not os.path.isfile(model.local_path):
-        return
+        raise RuntimeError("Model file is missing on disk")
     model_dir = Path(model.local_path).parent
-    modelfile_path = model_dir / "Modelfile"
-    modelfile_path.write_text(f"FROM {model.local_path}\n", encoding="utf-8")
     ollama_name = _ollama_model_name(model)
+    modelfile_path = model_dir / f"Modelfile.{ollama_name}"
+    modelfile_path.write_text(f"FROM {model.local_path}\n", encoding="utf-8")
     try:
         client = docker.from_env()
-        container_id = open("/etc/hostname").read().strip()
+        container_id = Path("/etc/hostname").read_text(encoding="utf-8").strip()
         client.containers.run(
             "ollama/ollama:latest",
             ["create", ollama_name, "-f", str(modelfile_path)],
@@ -60,50 +69,102 @@ def ensure_model_in_ollama(model: Model) -> None:
     register_model_in_ollama(model)
 
 
+def recreate_model_in_ollama(model: Model) -> None:
+    """Rebuild a broken Ollama model registration from the GGUF file."""
+    try:
+        unload_model_from_ollama(model)
+    except Exception:
+        pass
+    try:
+        delete_model_from_ollama(model)
+    except Exception:
+        pass
+    register_model_in_ollama(model)
+
+
 def chat_stream(
     model: Model,
     messages: list[dict[str, str]],
     *,
     temperature: float = 0.7,
-    max_tokens: int = 512,
+    max_tokens: int | None = None,
     top_p: float = 0.95,
     top_k: int = 40,
     repeat_penalty: float = 1.1,
 ):
     """Stream chat completion from Ollama. Yields (content_delta, done, eval_count)."""
     ollama_name = _ollama_model_name(model)
-    url = _ollama_url("/api/chat")
-    payload = {
-        "model": ollama_name,
-        "messages": messages,
-        "stream": True,
-        "options": {
-            "temperature": temperature,
-            "num_predict": max_tokens,
-            "top_p": top_p,
-            "top_k": top_k,
-            "repeat_penalty": repeat_penalty,
-        },
+    options = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "top_k": top_k,
+        "repeat_penalty": repeat_penalty,
     }
-    with httpx.Client(timeout=300.0) as client:
-        with client.stream("POST", url, json=payload) as resp:
-            resp.raise_for_status()
-            eval_count = 0
-            for line in resp.iter_lines():
-                if not line:
-                    continue
+    if max_tokens is not None:
+        options["num_predict"] = max_tokens
+    last_err: Exception | None = None
+    attempted_recreate = False
+
+    while True:
+        with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
+            for path, payload in (
+                (
+                    "/api/chat",
+                    {
+                        "model": ollama_name,
+                        "messages": messages,
+                        "stream": True,
+                        "keep_alive": "30m",
+                        "options": options,
+                    },
+                ),
+                (
+                    "/api/generate",
+                    {
+                        "model": ollama_name,
+                        "prompt": "\n".join(f"{m['role']}: {m['content']}" for m in messages),
+                        "stream": True,
+                        "keep_alive": "30m",
+                        "options": options,
+                    },
+                ),
+            ):
                 try:
-                    data = json.loads(line)
-                except json.JSONDecodeError:
+                    with client.stream("POST", _ollama_url(path), json=payload) as resp:
+                        if resp.status_code >= 400:
+                            body = resp.read().decode("utf-8", errors="replace")
+                            raise RuntimeError(f"{path}: {resp.status_code} {body[:400]}")
+                        eval_count = 0
+                        for line in resp.iter_lines():
+                            if not line:
+                                continue
+                            try:
+                                data = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if path == "/api/chat":
+                                msg = data.get("message") or {}
+                                content = msg.get("content") or ""
+                            else:
+                                content = data.get("response") or ""
+                            if content:
+                                yield content, False, 0
+                            if data.get("done"):
+                                eval_count = data.get("eval_count") or 0
+                                yield "", True, eval_count
+                                return
+                except Exception as e:
+                    last_err = e
                     continue
-                msg = data.get("message") or {}
-                content = msg.get("content") or ""
-                if content:
-                    yield content, False, 0
-                if data.get("done"):
-                    eval_count = data.get("eval_count") or 0
-                    yield "", True, eval_count
-                    return
+
+        if last_err and (not attempted_recreate) and _looks_like_broken_ollama_model_error(str(last_err)):
+            attempted_recreate = True
+            recreate_model_in_ollama(model)
+            last_err = None
+            continue
+        break
+
+    raise last_err or RuntimeError("Failed to stream response from Ollama")
 
 
 def load_model_in_ollama(model: Model) -> None:
@@ -111,18 +172,29 @@ def load_model_in_ollama(model: Model) -> None:
     ensure_model_in_ollama(model)
     ollama_name = _ollama_model_name(model)
     last_err: Exception | None = None
-    for path, payload in (
-        ("/api/chat", {"model": ollama_name, "messages": [{"role": "user", "content": " "}], "stream": False, "options": {"num_predict": 1}, "keep_alive": "30m"}),
-        ("/api/generate", {"model": ollama_name, "prompt": " ", "stream": False, "options": {"num_predict": 1}, "keep_alive": "30m"}),
-    ):
-        try:
-            with httpx.Client(timeout=120.0) as client:
-                r = client.post(_ollama_url(path), json=payload)
-                if r.status_code == 200:
-                    return
-                last_err = RuntimeError(f"{path}: {r.status_code} {r.text[:200]}")
-        except Exception as e:
-            last_err = e
+    attempted_recreate = False
+
+    while True:
+        for path, payload in (
+            ("/api/chat", {"model": ollama_name, "messages": [{"role": "user", "content": " "}], "stream": False, "options": {"num_predict": 1}, "keep_alive": "30m"}),
+            ("/api/generate", {"model": ollama_name, "prompt": " ", "stream": False, "options": {"num_predict": 1}, "keep_alive": "30m"}),
+        ):
+            try:
+                with httpx.Client(timeout=120.0) as client:
+                    r = client.post(_ollama_url(path), json=payload)
+                    if r.status_code == 200:
+                        return
+                    last_err = RuntimeError(f"{path}: {r.status_code} {r.text[:400]}")
+            except Exception as e:
+                last_err = e
+
+        if last_err and (not attempted_recreate) and _looks_like_broken_ollama_model_error(str(last_err)):
+            attempted_recreate = True
+            recreate_model_in_ollama(model)
+            last_err = None
+            continue
+        break
+
     raise (last_err or RuntimeError("Failed to load model"))
 
 
@@ -172,6 +244,18 @@ def unload_model_from_ollama(model: Model) -> None:
                     return
         except Exception:
             continue
+
+
+def delete_model_from_ollama(model: Model) -> None:
+    """Delete registered model from Ollama. 404 is treated as already deleted."""
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            r = client.request("DELETE", _ollama_url("/api/delete"), json={"model": _ollama_model_name(model)})
+            if r.status_code in (200, 404):
+                return
+            raise RuntimeError(f"Ollama delete failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        raise RuntimeError(str(e)) from e
 
 
 def list_loaded_ollama() -> list[str]:

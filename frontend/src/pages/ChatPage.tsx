@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { API_BASE_URL, apiRequest } from '../lib/api'
+import type { ModelParamsOut } from '../types'
 
 function splitByThinkTags(text: string): { type: 'normal' | 'think'; text: string }[] {
   const parts: { type: 'normal' | 'think'; text: string }[] = []
@@ -49,13 +50,15 @@ export function ChatPage({
   const messagesEndRef = useRef<HTMLDivElement | null>(null)
 
   const [temperature, setTemperature] = useState(0.7)
-  const [maxTokens, setMaxTokens] = useState(512)
+  const [maxTokens, setMaxTokens] = useState<number | ''>('')
   const [topP, setTopP] = useState(0.95)
   const [topK, setTopK] = useState(40)
   const [repeatPenalty, setRepeatPenalty] = useState(1.1)
   const [systemPrompt, setSystemPrompt] = useState('')
+  const [paramsInfo, setParamsInfo] = useState('Параметры из формы будут отправлены в Ollama при генерации.')
 
   const modelsById = useMemo(() => new Map(models.map((m) => [m.id, m])), [models])
+  const downloadableModels = useMemo(() => models.filter((m) => !!m.local_path), [models])
 
   async function refreshSidebar() {
     setLoadErr(null)
@@ -66,7 +69,10 @@ export function ChatPage({
       ])
       setModels(m)
       setChats(c)
-      if (newChatModelId === '' && m.length > 0) setNewChatModelId(m[0].id)
+      if (newChatModelId === '' && m.length > 0) {
+        const firstReady = m.find((item) => !!item.local_path)
+        if (firstReady) setNewChatModelId(firstReady.id)
+      }
     } catch (e: any) {
       const msg = e?.message ?? String(e)
       setLoadErr(msg.includes('Failed to fetch') ? 'Backend недоступен. Запустите docker compose up.' : msg)
@@ -97,19 +103,33 @@ export function ChatPage({
   // Fetch Ollama model params when model is selected (chat loaded or new chat model picked)
   useEffect(() => {
     const modelId = detail?.chat?.model_id ?? (newChatModelId !== '' ? Number(newChatModelId) : null)
-    if (!modelId) return
-    apiRequest<{ temperature?: number; num_predict?: number; top_p?: number; top_k?: number; repeat_penalty?: number }>(
+    if (!modelId) {
+      setParamsInfo('Параметры из формы будут отправлены в Ollama при генерации.')
+      return
+    }
+    apiRequest<ModelParamsOut>(
       `/models/${modelId}/ollama-params`,
       { token }
     )
       .then((p) => {
         if (p.temperature != null) setTemperature(p.temperature)
-        if (p.num_predict != null) setMaxTokens(p.num_predict)
+        setMaxTokens(p.num_predict ?? '')
         if (p.top_p != null) setTopP(p.top_p)
         if (p.top_k != null) setTopK(p.top_k)
         if (p.repeat_penalty != null) setRepeatPenalty(p.repeat_penalty)
+        setParamsInfo(
+          p.source === 'saved+ollama'
+            ? 'Часть параметров сохранена у модели, остальные дочитаны из Ollama. Их можно менять перед отправкой.'
+            : p.source === 'saved'
+              ? 'Для этой модели сохранены дефолтные параметры. Они подставлены в форму и пойдут в новые сообщения.'
+              : p.source === 'ollama'
+                ? 'Сохраненных дефолтов нет, поэтому подставлены параметры из Ollama.'
+                : 'У модели нет сохраненных параметров. Используются значения из формы справа.'
+        )
       })
-      .catch(() => {})
+      .catch(() => {
+        setParamsInfo('Не удалось прочитать параметры из Ollama. При генерации будут использованы значения из формы.')
+      })
   }, [detail?.chat?.model_id, newChatModelId, token])
 
   async function onDeleteChat(e: React.MouseEvent, chatId: number) {
@@ -182,11 +202,11 @@ export function ChatPage({
       const params = new URLSearchParams({
         after_message_id: String(userMsg.id),
         temperature: String(safeNum(temperature, 0.7, 0, 2)),
-        max_tokens: String(Math.round(safeNum(maxTokens, 512, 1, 4096))),
         top_p: String(safeNum(topP, 0.95, 0, 1)),
         top_k: String(Math.round(safeNum(topK, 40, 1, 100))),
         repeat_penalty: String(safeNum(repeatPenalty, 1.1, 1, 2)),
       })
+      if (maxTokens !== '') params.set('max_tokens', String(Math.round(safeNum(maxTokens, 512, 1, 4096))))
       if (systemPrompt.trim()) params.set('system_prompt', systemPrompt.trim())
       const streamUrl = `${API_BASE_URL}/chats/${activeChatId}/stream?${params}`
       const streamOpts: RequestInit = {
@@ -236,6 +256,9 @@ export function ChatPage({
       await refreshSidebar()
     } catch (e: any) {
       const ae = e as ApiError
+      if (activeChatId) {
+        loadChat(activeChatId).catch(() => {})
+      }
       setErr(ae?.message ?? String(e))
     } finally {
       setBusy(false)
@@ -267,7 +290,7 @@ export function ChatPage({
               onChange={(e) => setNewChatModelId(e.target.value ? Number(e.target.value) : '')}
             >
               <option value="">Pick model…</option>
-              {models.map((m) => (
+              {downloadableModels.map((m) => (
                 <option key={m.id} value={m.id}>
                   #{m.id} {m.hf_filename}
                 </option>
@@ -283,6 +306,10 @@ export function ChatPage({
           {newChatModelId !== '' ? (
             <div className="muted" style={{ fontSize: 12 }}>
               {modelsById.get(Number(newChatModelId))?.hf_repo}
+            </div>
+          ) : downloadableModels.length === 0 ? (
+            <div className="muted" style={{ fontSize: 12 }}>
+              Сначала скачай хотя бы одну модель на странице Models.
             </div>
           ) : null}
         </form>
@@ -381,7 +408,7 @@ export function ChatPage({
       </div>
 
       <div className="card" style={{ minHeight: 0, overflow: 'auto' }}>
-        <h3 style={{ marginTop: 0 }}>Настройки</h3>
+        <h3 style={{ marginTop: 0 }}>Параметры генерации</h3>
         <div className="list">
           <label>
             <span className="muted" style={{ fontSize: 12 }}>Модель</span>
@@ -389,6 +416,9 @@ export function ChatPage({
               {detail ? modelsById.get(detail.chat.model_id)?.hf_filename ?? `#${detail.chat.model_id}` : '—'}
             </div>
           </label>
+          <div className="muted" style={{ fontSize: 12, lineHeight: 1.5 }}>
+            {paramsInfo}
+          </div>
           <label>
             <span className="muted" style={{ fontSize: 12 }}>Temperature</span>
             <input
@@ -412,10 +442,18 @@ export function ChatPage({
               step={1}
               value={maxTokens}
               onChange={(e) => {
+                if (!e.target.value.trim()) {
+                  setMaxTokens('')
+                  return
+                }
                 const v = parseInt(e.target.value, 10)
                 if (!Number.isNaN(v)) setMaxTokens(Math.max(1, Math.min(4096, v)))
               }}
+              placeholder="Авто"
             />
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Пусто = авто. Тогда жёсткий лимит ответа не отправляется, и модель останавливается сама.
+            </div>
           </label>
           <label>
             <span className="muted" style={{ fontSize: 12 }}>Top P</span>

@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.models import Chat, Message, Model, User
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.schemas import ChatCreateIn, ChatDeleteIn, ChatDetailOut, ChatOut, MessageCreateIn, MessageOut, StreamParamsIn
 from app.services.ollama_client import chat_stream, ensure_model_in_ollama
 
@@ -30,6 +30,8 @@ def create_chat(payload: ChatCreateIn, user: User = Depends(get_current_user), d
     model = db.get(Model, payload.model_id)
     if not model:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found")
+    if not model.local_path:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model is not downloaded yet")
 
     title = payload.title.strip() if payload.title else "New chat"
     chat = Chat(user_id=user.id, model_id=model.id, title=title)
@@ -76,7 +78,11 @@ def add_user_message(
     if not chat or chat.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Chat not found")
 
-    msg = Message(chat_id=chat.id, role="user", content=payload.content)
+    content = payload.content.strip()
+    if not content:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Message must not be empty")
+
+    msg = Message(chat_id=chat.id, role="user", content=content)
     db.add(msg)
     db.commit()
     db.refresh(msg)
@@ -94,7 +100,10 @@ def _stream_assistant_impl(chat_id: int, payload: StreamParamsIn, user: User, db
     if not model.local_path:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Model is not downloaded yet")
 
-    ensure_model_in_ollama(model)
+    try:
+        ensure_model_in_ollama(model)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e)) from e
 
     messages = db.scalars(
         select(Message).where(Message.chat_id == chat.id, Message.id <= payload.after_message_id).order_by(asc(Message.id))
@@ -128,12 +137,15 @@ def _stream_assistant_impl(chat_id: int, payload: StreamParamsIn, user: User, db
                     break
             final_text = "".join(assistant_text_parts).strip()
             if final_text:
-                m = Message(chat_id=chat.id, role="assistant", content=final_text, tokens_used=tokens_used or None)
-                db.add(m)
-                db.commit()
+                db_save = SessionLocal()
+                try:
+                    m = Message(chat_id=chat.id, role="assistant", content=final_text, tokens_used=tokens_used or None)
+                    db_save.add(m)
+                    db_save.commit()
+                finally:
+                    db_save.close()
             yield {"event": "done", "data": str(tokens_used)}
         except Exception as e:
-            db.rollback()
             yield {"event": "error", "data": str(e)}
 
     return EventSourceResponse(event_gen())
@@ -144,7 +156,7 @@ def stream_assistant_get(
     chat_id: int,
     after_message_id: int = Query(..., alias="after_message_id"),
     temperature: float = Query(0.7),
-    max_tokens: int = Query(512),
+    max_tokens: int | None = Query(None),
     top_p: float = Query(0.95),
     top_k: int = Query(40),
     repeat_penalty: float = Query(1.1),

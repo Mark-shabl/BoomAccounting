@@ -8,6 +8,11 @@ export type ModelOut = {
   hf_filename: string
   local_path: string | null
   size_bytes: number | null
+  default_temperature?: number | null
+  default_max_tokens?: number | null
+  default_top_p?: number | null
+  default_top_k?: number | null
+  default_repeat_penalty?: number | null
   created_at: string
 }
 
@@ -19,8 +24,10 @@ export type LoadedModelsResponse = {
 export type ModelDownloadJobOut = {
   id: number
   model_id: number
-  status: 'pending' | 'running' | 'done' | 'failed' | string
+  status: 'pending' | 'running' | 'done' | 'failed' | 'cancelled' | string
   progress_bytes: number
+  /** Total file size from Hugging Face metadata (when available) */
+  expected_bytes?: number | null
   error: string | null
   started_at: string | null
   finished_at: string | null
@@ -57,5 +64,14 @@ export type MessageOut = {
 export type ChatDetail = {
   chat: ChatOut
   messages: MessageOut[]
+}
+
+export type ModelParamsOut = {
+  temperature?: number | null
+  num_predict?: number | null
+  top_p?: number | null
+  top_k?: number | null
+  repeat_penalty?: number | null
+  source?: string
 }
 
