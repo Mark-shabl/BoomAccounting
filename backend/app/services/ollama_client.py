@@ -11,6 +11,11 @@ import httpx
 
 from app.db.models import Model
 
+DEFAULT_SYSTEM_PROMPT = (
+    "Ты полезный ассистент. Отвечай на языке пользователя обычным текстом. "
+    "Не продолжай диалог за пользователя и не придумывай скрытый контекст."
+)
+
 
 def _ollama_model_name(model: Model) -> str:
     """Unique Ollama model name for our Model."""
@@ -29,6 +34,53 @@ def _looks_like_broken_ollama_model_error(message: str) -> bool:
         or "/root/.ollama/models/blobs/" in msg
         or "no such file or directory" in msg
     )
+
+
+def _uses_plain_completion_template(ollama_name: str) -> bool:
+    """Models without a chat template need explicit prompt formatting."""
+    try:
+        r = httpx.post(_ollama_url("/api/show"), json={"model": ollama_name}, timeout=10.0)
+        if r.status_code != 200:
+            return False
+        data = r.json()
+        return (data.get("template") or "").strip() == "{{ .Prompt }}"
+    except Exception:
+        return False
+
+
+def _completion_prompt(messages: list[dict[str, str]]) -> str:
+    """Format chat messages for completion-only GGUF models.
+
+    LFM2.5 GGUF currently registers in Ollama with TEMPLATE {{ .Prompt }},
+    so /api/chat does not apply the model's ChatML-style instruction format.
+    """
+    system_parts: list[str] = []
+    dialogue: list[dict[str, str]] = []
+    for message in messages:
+        role = message.get("role")
+        content = (message.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            system_parts.append(content)
+        elif role in {"user", "assistant"}:
+            dialogue.append({"role": role, "content": content})
+
+    # Small completion models are easily derailed by long or bad previous turns.
+    dialogue = dialogue[-8:]
+    system_text = "\n\n".join(system_parts).strip() or DEFAULT_SYSTEM_PROMPT
+
+    lines = ["<|startoftext|>"]
+    lines.append(f"<|im_start|>system\n{system_text}<|im_end|>\n")
+    for message in dialogue:
+        lines.append(f"<|im_start|>{message['role']}\n{message['content']}<|im_end|>\n")
+    lines.append("<|im_start|>assistant\n")
+    return "".join(lines)
+
+
+def _completion_options(options: dict) -> dict:
+    return {**options, "stop": ["<|im_end|>", "<|im_start|>"]}
+
 
 
 def register_model_in_ollama(model: Model) -> None:
@@ -107,28 +159,43 @@ def chat_stream(
 
     while True:
         with httpx.Client(timeout=httpx.Timeout(300.0, connect=30.0)) as client:
-            for path, payload in (
-                (
-                    "/api/chat",
-                    {
-                        "model": ollama_name,
-                        "messages": messages,
-                        "stream": True,
-                        "keep_alive": "30m",
-                        "options": options,
-                    },
-                ),
-                (
-                    "/api/generate",
-                    {
-                        "model": ollama_name,
-                        "prompt": "\n".join(f"{m['role']}: {m['content']}" for m in messages),
-                        "stream": True,
-                        "keep_alive": "30m",
-                        "options": options,
-                    },
-                ),
-            ):
+            if _uses_plain_completion_template(ollama_name):
+                requests = (
+                    (
+                        "/api/generate",
+                        {
+                            "model": ollama_name,
+                            "prompt": _completion_prompt(messages),
+                            "stream": True,
+                            "keep_alive": "30m",
+                            "options": _completion_options(options),
+                        },
+                    ),
+                )
+            else:
+                requests = (
+                    (
+                        "/api/chat",
+                        {
+                            "model": ollama_name,
+                            "messages": messages,
+                            "stream": True,
+                            "keep_alive": "30m",
+                            "options": options,
+                        },
+                    ),
+                    (
+                        "/api/generate",
+                        {
+                            "model": ollama_name,
+                            "prompt": _completion_prompt(messages),
+                            "stream": True,
+                            "keep_alive": "30m",
+                            "options": _completion_options(options),
+                        },
+                    ),
+                )
+            for path, payload in requests:
                 try:
                     with client.stream("POST", _ollama_url(path), json=payload) as resp:
                         if resp.status_code >= 400:
